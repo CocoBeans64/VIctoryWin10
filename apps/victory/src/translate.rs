@@ -483,10 +483,15 @@ fn translate(
     t: &mut Tally,
     checks: &mut Checks,
 ) {
-    let example = || format!("{}{}", path.display(), source.label());
     let Some(bytes) = source.bytes() else {
+        let example = || format!("{}{}", path.display(), source.label());
         return t.fail("corrupt record".into(), example);
     };
+    // Local diagnostics: the hash `run` names the shader by (the container
+    // as the title passes it, its own size).
+    let size = bytes.get(0x18..0x1c).map_or(0, |b| u32::from_le_bytes(b.try_into().expect("4")) as usize);
+    let run_hash = blake3::hash(&bytes[..size.min(bytes.len())]).to_hex()[..16].to_owned();
+    let example = || format!("h{run_hash} {}{}", path.display(), source.label());
     t.containers += 1;
     let Ok(container) = Container::parse(&bytes) else {
         return t.fail("no DXIL part (SM5 or older)".into(), example);
@@ -607,14 +612,16 @@ fn check(
     if t.list
         && let Ok(dir) = std::env::var("VICTORY_EMIT_DUMP")
     {
-        let name: String = label()
+        let only = std::env::var("VICTORY_EMIT_ONLY").unwrap_or_default();
+        let l = label();
+        let wanted = only.is_empty() || only.split(',').any(|h| l.contains(h));
+        let name: String = if wanted { l } else { String::new() }
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
             .collect();
-        let _ = std::fs::write(
-            format!("{dir}/{}.dxil", &name[name.len().saturating_sub(100)..]),
-            &shader.dxil,
-        );
+        if !name.is_empty() {
+            let _ = std::fs::write(format!("{dir}/{}_{:?}.dxil", &name[..name.len().min(100)], shader.stage), &shader.dxil);
+        }
     }
     if let Some((h, stub_ps)) = &checks.host {
         let made = match shader.stage {
