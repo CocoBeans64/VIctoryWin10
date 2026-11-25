@@ -58,6 +58,27 @@ repository then fetches the pinned toolchain. Building needs the MSVC C++
 build tools: Visual Studio or its Build Tools with the "Desktop development
 with C++" workload.
 
+### Windows 10
+
+Windows 10's own Direct3D 12 runtime stops at shader model 6.5 on hardware
+(6.2 on WARP), whatever the GPU and driver; the title's pipelines need 6.6, so
+nothing is drawn and the log reports `host shader model 6.5, below the 6.6`.
+`victory.exe` can run on the Agility SDK's runtime instead, which you
+download from Microsoft (nothing of it is in this repository):
+
+1. From nuget.org, download the package `Microsoft.Direct3D.D3D12` version
+   **1.614.x** (the 614 must match `D3D12SDKVersion` in
+   `apps/victory/src/main.rs`). A `.nupkg` is a zip file.
+2. Copy `build\native\bin\x64\D3D12Core.dll` (and `d3d12SDKLayers.dll` for
+   `VICTORY_D3D12_DEBUG`) into a `D3D12` folder next to `victory.exe`, e.g.
+   `target\release\D3D12\` or `target\diag\D3D12\`.
+3. For `VICTORY_D3D12_WARP`: from the package `Microsoft.Direct3D.WARP`, copy
+   `build\native\bin\x64\d3d10warp.dll` next to `victory.exe`.
+
+The log then reports `host shader model 6.6` or higher. Without the folder,
+or on a Windows whose runtime is newer, the system's runtime is used. Tested
+on Windows 10 22H2 (19045) with Agility SDK 1.614.1 and WARP 1.0.22.
+
 The title also needs several GiB of available Windows commit at startup.
 Check **Committed** under **Task Manager → Performance → Memory**. If
 `crashes.log` reports Windows error 1455, close other applications or increase

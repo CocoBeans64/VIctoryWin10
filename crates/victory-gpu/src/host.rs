@@ -137,6 +137,46 @@ pub(crate) fn host() -> Option<&'static Host> {
     .as_ref()
 }
 
+/// Logs the host device's highest shader model, and says what to do when it
+/// is below 6.6: the title's pipelines index the descriptor heap from their
+/// shaders, so every one is refused and nothing is drawn. On Windows 10 the
+/// system's Direct3D 12 runtime stops at 6.5 on hardware and 6.2 on WARP
+/// whatever the GPU; the Agility SDK's runtime next to the executable lifts
+/// that (README, "Windows 10").
+fn shader_model_check(device: &ID3D12Device) {
+    let mut model = D3D12_FEATURE_DATA_SHADER_MODEL {
+        HighestShaderModel: D3D_SHADER_MODEL_6_6,
+    };
+    // SAFETY: the query writes its own structure of the given size.
+    let ok = unsafe {
+        device.CheckFeatureSupport(
+            D3D12_FEATURE_SHADER_MODEL,
+            (&raw mut model).cast(),
+            size_of_val(&model) as u32,
+        )
+    }
+    .is_ok();
+    let (major, minor) = (
+        model.HighestShaderModel.0 >> 4,
+        model.HighestShaderModel.0 & 0xF,
+    );
+    // A runtime older than 6.6 may refuse the query outright.
+    let model = if ok {
+        format!("{major}.{minor}")
+    } else {
+        "unknown".to_owned()
+    };
+    if ok && (major, minor) >= (6, 6) {
+        tracing::info!("host shader model {model}");
+    } else {
+        tracing::error!(
+            "host shader model {model}, below the 6.6 the title's pipelines need: \
+             nothing will be drawn. On Windows 10, put the Agility SDK's D3D12Core.dll in \
+             D3D12\\ next to victory.exe (README, \"Windows 10\"), or update the GPU driver"
+        );
+    }
+}
+
 fn create() -> windows::core::Result<Host> {
     // SAFETY: plain D3D12 object creation with valid descriptions.
     unsafe {
@@ -191,6 +231,7 @@ fn create() -> windows::core::Result<Host> {
             crate::tdr::log();
         }
         let device = device.ok_or_else(windows::core::Error::empty)?;
+        shader_model_check(&device);
         let messages = debug
             .then(|| device.cast::<ID3D12InfoQueue>().ok())
             .flatten();
