@@ -52,6 +52,17 @@ Requirements: Windows 10/11 x64, a CPU with AVX2, a Direct3D 12 GPU with
 shader model 6.6 (and mesh shaders for the world), Rust (pinned in
 `rust-toolchain.toml`).
 
+Windows 10: its own Direct3D 12 runtime stops at shader model 6.5 on the
+GPU (6.2 on WARP), so the title's pipelines are refused and nothing is
+drawn. `victory.exe` asks for the Agility SDK runtime instead
+(`D3D12SDKVersion` 614, in `D3D12\` next to the executable). Download the
+NuGet package `Microsoft.Direct3D.D3D12` 1.614.x and copy its
+`build\native\bin\x64\D3D12Core.dll` (and `d3d12SDKLayers.dll`) to
+`target\<profile>\D3D12\`; for WARP also copy `d3d10warp.dll` from the
+package `Microsoft.Direct3D.WARP` next to `victory.exe`. Without that
+folder, or on a Windows whose runtime is newer, the system's is used.
+Tested on Windows 10 22H2 (19045) with an RX 6800 XT: the world is reached.
+
 To install Rust, use rustup (`winget install --id Rustlang.Rustup -e`, or
 the installer from https://rustup.rs). The first `cargo` command in this
 repository then fetches the pinned toolchain. Building needs the MSVC C++
