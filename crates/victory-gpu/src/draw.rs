@@ -1813,7 +1813,7 @@ impl State {
                 max,
                 &clamped,
                 0,
-                counter.as_ref().map(|(s, _)| &s.buffer),
+                counter.as_ref().map(|(s, _)| &*s.buffer),
                 counter.as_ref().map_or(0, |(s, at)| s.offset(*at)),
             )
         };
@@ -1824,7 +1824,7 @@ impl State {
             let always = !crate::host::traced_shaders().is_empty()
                 && crate::host::is_traced(&crate::pipeline::shaders_of(pipeline));
             if always || crate::capture::dump_on() {
-                let count = counter.as_ref().map(|(s, at)| (&s.buffer, s.offset(*at)));
+                let count = counter.as_ref().map(|(s, at)| (&*s.buffer, s.offset(*at)));
                 let name = crate::pipeline::shaders_of(pipeline);
                 crate::capture::read_indirect(list, (&clamped, 0), count, (kind, stride, max), name, always);
             }
