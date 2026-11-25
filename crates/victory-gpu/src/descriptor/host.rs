@@ -2606,7 +2606,7 @@ pub(crate) mod unknown {
             std::mem::replace(state, State { last, ..Default::default() })
         };
         let mut tags: Vec<_> = st.tags.into_iter().collect();
-        tags.sort_by(|a, b| b.1.cmp(&a.1));
+        tags.sort_by_key(|a| std::cmp::Reverse(a.1));
         let tags: Vec<String> = tags.iter().take(10).map(|(t, n)| format!("{t:08x} x{:.0}", *n as f64 / frames)).collect();
         tracing::info!(
             "  unknown records per frame: {:.0} seen, {:.0} same bytes as last time, now ours {:.0}, now zero {:.0},              address-like {:.0} (mapped {:.0}); first dwords: {}",
