@@ -104,8 +104,36 @@ pub(crate) enum C {
     /// Title threads writing a view into a shader-visible heap: time
     /// waiting for the heaps' lock (held by heap syncs and other writers).
     MirrorWaitUs,
+    /// Heap syncs (proposal 2 diagnostics): syncs, mapped pages looked at,
+    /// slots found stale and made again, time reading and comparing
+    /// records, time making the stale slots.
+    SyncCalls,
+    SyncPages,
+    SyncStale,
+    SyncReadUs,
+    SyncMirrorUs,
+    /// Stale slots by what the title wrote (step 2a): a record of no
+    /// current view (made null), a slot never made, the same view as the
+    /// slot was last made from (by content), another view; and by kind.
+    StaleNull,
+    StaleFirst,
+    StaleSame,
+    StaleOther,
+    StaleConstant,
+    StaleShader,
+    StaleUnordered,
+    StalePlaced,
+    StaleSampler,
+    /// Slots made null by heap syncs, by record: zeroed (tag 0), our tag
+    /// with a generation no longer current, anything else; the time
+    /// making null slots and making views.
+    NullZero,
+    NullOld,
+    NullOther,
+    NullUs,
+    ViewUs,
 }
-const COUNTERS: usize = 61;
+const COUNTERS: usize = 80;
 static COUNT: [AtomicU64; COUNTERS] = [const { AtomicU64::new(0) }; COUNTERS];
 
 pub(crate) fn add(c: C, n: u64) {
@@ -310,6 +338,36 @@ pub(crate) fn log(frames: f64) {
         .map(|(line, total, longest)| format!("watch.rs:{line} {:.1} ms (longest {longest:.1})", total / frames))
         .collect();
     tracing::info!("  guard lock held per frame: {}", held.join(", "));
+    tracing::info!(
+        "  heap syncs per frame: {:.1} syncs, {:.0} pages, {:.0} slots looked at, {:.0} stale; reading {:.1} ms, making {:.1} ms",
+        c[C::SyncCalls as usize],
+        c[C::SyncPages as usize],
+        c[C::SyncSlots as usize],
+        c[C::SyncStale as usize],
+        ms(c[C::SyncReadUs as usize]),
+        ms(c[C::SyncMirrorUs as usize]),
+    );
+    tracing::info!(
+        "  stale slots per frame: {:.0} made null, {:.0} first made, {:.0} same view again, {:.0} other view;          {:.0} constant, {:.0} shader, {:.0} unordered, {:.0} placed, {:.0} sampler",
+        c[C::StaleNull as usize],
+        c[C::StaleFirst as usize],
+        c[C::StaleSame as usize],
+        c[C::StaleOther as usize],
+        c[C::StaleConstant as usize],
+        c[C::StaleShader as usize],
+        c[C::StaleUnordered as usize],
+        c[C::StalePlaced as usize],
+        c[C::StaleSampler as usize],
+    );
+    tracing::info!(
+        "  made null per frame: {:.0} zeroed records, {:.0} old generations, {:.0} other; making null {:.1} ms, views {:.1} ms",
+        c[C::NullZero as usize],
+        c[C::NullOld as usize],
+        c[C::NullOther as usize],
+        ms(c[C::NullUs as usize]),
+        ms(c[C::ViewUs as usize]),
+    );
+    crate::descriptor::host::unknown::log(frames);
     let mut snapshots: Vec<((u64, u64), u64)> =
         SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner()).take().into_iter().flatten().collect();
     snapshots.sort_by_key(|&(_, bytes)| std::cmp::Reverse(bytes));
