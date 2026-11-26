@@ -65,8 +65,7 @@ fn writeback_merge_matches_bytewise_oracle() {
 
 /// A title buffer's host copy.
 pub(crate) struct Shadow {
-    /// Released by [`release_later`] when the copy goes.
-    pub(crate) buffer: std::mem::ManuallyDrop<ID3D12Resource>,
+    pub(crate) buffer: ID3D12Resource,
     data: *mut u8,
     gpu: u64,
     /// Where the title buffer starts and how long it is.
@@ -254,7 +253,7 @@ impl Shadow {
         let tracked = crate::watch::track_copy(start as usize, len as usize, true);
         let marks = tracked.as_ref().and_then(|_| marks().take(pages(start, len)));
         let shadow = Arc::new(Shadow {
-            buffer: std::mem::ManuallyDrop::new(buffer),
+            buffer,
             data,
             gpu,
             start,
@@ -694,8 +693,6 @@ impl Shadow {
 
 impl Drop for Shadow {
     fn drop(&mut self) {
-        // SAFETY: taken once, here; the field is not used after.
-        release_later(unsafe { std::mem::ManuallyDrop::take(&mut self.buffer) });
         if let Some(slice) = self.slice {
             arena().give_back(slice);
         }
@@ -704,32 +701,6 @@ impl Drop for Shadow {
             m.owners.remove(&base);
             m.give_back(base, pages(self.start, self.len));
         }
-    }
-}
-
-/// Releases `buffer` on a thread of its own: the driver frees a buffer's
-/// memory in the release (up to milliseconds), which the submission thread
-/// paid for every copy gone when it rewrote a page table (~17 % of its
-/// time, profile cpu-waits). The GPU no longer reads it: a copy goes only
-/// once no submission holds it.
-fn release_later(buffer: ID3D12Resource) {
-    struct Sent(#[allow(dead_code)] ID3D12Resource);
-    // SAFETY: D3D12 objects are free-threaded.
-    unsafe impl Send for Sent {}
-    static TX: std::sync::OnceLock<Option<Mutex<std::sync::mpsc::Sender<Sent>>>> = std::sync::OnceLock::new();
-    let tx = TX.get_or_init(|| {
-        let (tx, rx) = std::sync::mpsc::channel::<Sent>();
-        std::thread::Builder::new()
-            .name("victory buffer release".into())
-            .spawn(move || rx.into_iter().for_each(drop))
-            .ok()
-            .map(|_| Mutex::new(tx))
-    });
-    let buffer = Sent(buffer);
-    if let Some(tx) = tx
-        && let Err(e) = tx.lock().unwrap_or_else(|e| e.into_inner()).send(buffer)
-    {
-        drop(e.0);
     }
 }
 
@@ -999,15 +970,10 @@ struct Entry {
 }
 
 /// Title buffers by (start address, resource), with their copy once made.
-/// A read-write lock: every draw of the title's recording threads looks its
-/// buffers up here ([`find`]), almost always finding the copy made, while
-/// only a first use, a release or a new buffer writes (one mutex had the
-/// recording threads wake each other ~2,400 times a second, profile
-/// cpu-waits).
-static BUFFERS: std::sync::RwLock<BTreeMap<(u64, usize), Entry>> = std::sync::RwLock::new(BTreeMap::new());
+static BUFFERS: Mutex<BTreeMap<(u64, usize), Entry>> = Mutex::new(BTreeMap::new());
 
-fn buffers() -> std::sync::RwLockWriteGuard<'static, BTreeMap<(u64, usize), Entry>> {
-    BUFFERS.write().unwrap_or_else(|e| e.into_inner())
+fn buffers() -> std::sync::MutexGuard<'static, BTreeMap<(u64, usize), Entry>> {
+    BUFFERS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Counts copies made and title buffers released: [`all`] may differ when
@@ -1045,24 +1011,6 @@ pub(crate) fn unregister(resource: usize, start: u64) {
 /// len)`, made on first use.
 pub(crate) fn find(address: u64, len: u64) -> Option<Arc<Shadow>> {
     let end = address.checked_add(len.max(1))?;
-    // Shared first: a buffer whose copy is made needs no write.
-    {
-        let map = BUFFERS.read().unwrap_or_else(|e| e.into_inner());
-        let hit = map
-            .range(..=(address, usize::MAX))
-            .rev()
-            .take(64)
-            .find(|(_, e)| e.end >= end)
-            .map(|(_, e)| e.shadow.clone());
-        match hit {
-            None => {
-                drop(map);
-                return loose(address, end);
-            }
-            Some(Some(shadow)) => return Some(shadow),
-            Some(None) => {}
-        }
-    }
     let mut map = buffers();
     let key = map
         .range(..=(address, usize::MAX))
