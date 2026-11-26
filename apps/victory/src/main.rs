@@ -16,6 +16,27 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 
+/// Agility SDK: the Direct3D 12 runtime in `D3D12\` next to the executable
+/// (`D3D12Core.dll`, from the user's own download of the
+/// Microsoft.Direct3D.D3D12 package of this version) instead of the
+/// system's, whose shader model may be too low (Windows 10: SM 6.5 on
+/// hardware, 6.2 on WARP; the title's pipelines need 6.6). Without that
+/// folder, or on a system whose runtime is newer, the system's is used.
+/// Exported by `build.rs`.
+// The names the Direct3D 12 loader looks up.
+#[cfg(windows)]
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+#[used]
+pub static D3D12SDKVersion: u32 = 614;
+
+/// The folder of [`D3D12SDKVersion`]'s runtime, relative to the executable.
+#[cfg(windows)]
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+#[used]
+pub static D3D12SDKPath: &[u8; 9] = b".\\D3D12\\\0";
+
 #[derive(Parser)]
 #[command(
     name = "victory",
