@@ -694,6 +694,8 @@ impl HostHeap {
     /// (a world frame looks at ~700,000 slots, run perf3: ~75 ms).
     pub(crate) fn sync_slots(&self, first: u32, last: u32, start: u64, step: u64) {
         let at = |i: u32| start + u64::from(i) * step;
+        #[cfg(feature = "diagnostics")]
+        let reading = crate::watch::Timed(std::time::Instant::now(), crate::copystat::C::SyncReadUs);
         // SAFETY: records in title heap memory the caller found mapped.
         let records: Vec<[u32; 3]> =
             (first..last).map(|i| unsafe { (at(i) as *const [u32; 3]).read_unaligned() }).collect();
@@ -710,8 +712,79 @@ impl HostHeap {
                 .map(|(i, _)| i)
                 .collect()
         };
+        #[cfg(feature = "diagnostics")]
+        {
+            drop(reading);
+            crate::copystat::add(crate::copystat::C::SyncStale, stale.len() as u64);
+            self.classify_stale(&stale, first, &records, start, step);
+        }
+        #[cfg(feature = "diagnostics")]
+        let _making = crate::watch::Timed(std::time::Instant::now(), crate::copystat::C::SyncMirrorUs);
         for i in stale {
+            #[cfg(feature = "diagnostics")]
+            let _one = {
+                let [tag, v, generation] = records[(i - first) as usize];
+                let null = tag != VIEW_TAG || view_at(v, generation).is_none();
+                crate::watch::Timed(
+                    std::time::Instant::now(),
+                    if null { crate::copystat::C::NullUs } else { crate::copystat::C::ViewUs },
+                )
+            };
             self.mirror(i, at(i), false);
+        }
+    }
+
+    /// Diagnostics (step 2a): what the title wrote in stale slots, against
+    /// the view each slot was last seen with (a hash of its content).
+    #[cfg(feature = "diagnostics")]
+    fn classify_stale(&self, stale: &[u32], first: u32, records: &[[u32; 3]], start: u64, step: u64) {
+        use crate::copystat::{add, C};
+        use std::hash::{Hash, Hasher};
+        static LAST: std::sync::Mutex<Option<std::collections::HashMap<(usize, u32), u64>>> =
+            std::sync::Mutex::new(None);
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        let last = last.get_or_insert_with(Default::default);
+        let me = self as *const Self as usize;
+        for &i in stale {
+            let [tag, v, generation] = records[(i - first) as usize];
+            let view = (tag == VIEW_TAG).then(|| view_at(v, generation)).flatten();
+            let Some(view) = view else {
+                add(C::StaleNull, 1);
+                add(
+                    match tag {
+                        0 => C::NullZero,
+                        VIEW_TAG => C::NullOld,
+                        _ => C::NullOther,
+                    },
+                    1,
+                );
+                if tag != 0 && tag != VIEW_TAG {
+                    unknown::note(me, i, start + u64::from(i) * step, step);
+                }
+                last.remove(&(me, i));
+                continue;
+            };
+            add(
+                match view {
+                    View::Constant(..) => C::StaleConstant,
+                    View::Shader(..) => C::StaleShader,
+                    View::Unordered(..) => C::StaleUnordered,
+                    View::Placed(..) => C::StalePlaced,
+                    _ => C::StaleSampler,
+                },
+                1,
+            );
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            view.hash(&mut h);
+            let h = h.finish();
+            add(
+                match last.insert((me, i), h) {
+                    None => C::StaleFirst,
+                    Some(old) if old == h => C::StaleSame,
+                    Some(_) => C::StaleOther,
+                },
+                1,
+            );
         }
     }
 
@@ -2461,5 +2534,92 @@ mod tests {
         // SAFETY: plain device query.
         assert!(unsafe { host.device.GetDeviceRemovedReason() }.is_ok());
         assert_eq!(host.log_messages(), None);
+    }
+}
+
+/// Diagnostics: slots heap syncs made null whose record is neither zero
+/// nor ours (step 2a, "other"): what they hold, logged per frame-rate line.
+#[cfg(feature = "diagnostics")]
+pub(crate) mod unknown {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct State {
+        /// First dword: count.
+        tags: HashMap<u32, u64>,
+        /// Per slot (heap, index): hash of its last unknown bytes.
+        last: HashMap<(usize, u32), u64>,
+        samples: Vec<String>,
+        seen: u64,
+        repeated: u64,
+        ours_on_reread: u64,
+        zero_on_reread: u64,
+        address_like: u64,
+        address_mapped: u64,
+    }
+    static STATE: Mutex<Option<State>> = Mutex::new(None);
+
+    /// Slot `index` of heap `heap` at title address `at` (`step` bytes).
+    pub(crate) fn note(heap: usize, index: u32, at: u64, step: u64) {
+        let len = step.min(32) as usize;
+        let mut bytes = [0u8; 32];
+        if !crate::host::read_into(at as *const u8, &mut bytes[..len]) {
+            return;
+        }
+        let dw: Vec<u32> = bytes[..len].chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+        let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let st = st.get_or_insert_with(Default::default);
+        st.seen += 1;
+        *st.tags.entry(dw[0]).or_default() += 1;
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        bytes[..len].hash(&mut h);
+        if st.last.insert((heap, index), h.finish()) == Some(h.finish()) {
+            st.repeated += 1;
+        }
+        // Torn read? What the slot holds now.
+        match dw[0] {
+            t if t == super::VIEW_TAG => st.ours_on_reread += 1,
+            0 => st.zero_on_reread += 1,
+            _ => {}
+        }
+        // A 48-bit GPU address in dwords 0-1 (AMD buffer/image descriptors).
+        let address = u64::from(dw[0]) | (u64::from(dw[1] & 0xffff) << 32);
+        if address > 0x10000 && address & 0xff == 0 {
+            st.address_like += 1;
+            if crate::host::read_into(address as *const u8, &mut [0u8; 1]) {
+                st.address_mapped += 1;
+            }
+        }
+        if st.samples.len() < 24 && st.seen % 97 == 1 {
+            let hex: Vec<String> = dw.iter().map(|d| format!("{d:08x}")).collect();
+            st.samples.push(format!("heap {heap:#x} slot {index} at {at:#x}: {}", hex.join(" ")));
+        }
+    }
+
+    pub(crate) fn log(frames: f64) {
+        let st = {
+            let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(state) = guard.as_mut() else { return };
+            let last = std::mem::take(&mut state.last);
+            std::mem::replace(state, State { last, ..Default::default() })
+        };
+        let mut tags: Vec<_> = st.tags.into_iter().collect();
+        tags.sort_by_key(|a| std::cmp::Reverse(a.1));
+        let tags: Vec<String> = tags.iter().take(10).map(|(t, n)| format!("{t:08x} x{:.0}", *n as f64 / frames)).collect();
+        tracing::info!(
+            "  unknown records per frame: {:.0} seen, {:.0} same bytes as last time, now ours {:.0}, now zero {:.0},              address-like {:.0} (mapped {:.0}); first dwords: {}",
+            st.seen as f64 / frames,
+            st.repeated as f64 / frames,
+            st.ours_on_reread as f64 / frames,
+            st.zero_on_reread as f64 / frames,
+            st.address_like as f64 / frames,
+            st.address_mapped as f64 / frames,
+            tags.join(", ")
+        );
+        for sample in &st.samples {
+            tracing::info!("    unknown record {sample}");
+        }
     }
 }

@@ -169,6 +169,8 @@ fn mirror(handle: u64) {
 pub(crate) fn sync_heaps() {
     // Held throughout: a heap is not dropped while its slots are made.
     let heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
+    #[cfg(feature = "diagnostics")]
+    crate::copystat::add(crate::copystat::C::SyncCalls, 1);
     for &(start, _, at) in heaps.iter() {
         // SAFETY: registered heaps are live (removed when dropped).
         let heap = unsafe { &*(at as *const Heap) };
@@ -188,6 +190,8 @@ pub(crate) fn sync_heaps() {
                     continue;
                 }
                 let (first, last) = ((page as u64 - start) / step, (end as u64 - start).div_ceil(step));
+                #[cfg(feature = "diagnostics")]
+                crate::copystat::add(crate::copystat::C::SyncPages, 1);
                 #[cfg(feature = "diagnostics")]
                 crate::copystat::add(
                     crate::copystat::C::SyncSlots,
@@ -423,7 +427,7 @@ const DSV_TAG: u32 = u32::from_le_bytes(*b"vDSV");
 
 /// A shader view or sampler as the title described it (descriptions in the
 /// host's layout, kept as words), for the host to build its own from.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum View {
     /// Constant buffer: GPU address and size.
     Constant(u64, u32),
